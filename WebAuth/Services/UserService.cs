@@ -18,18 +18,5 @@ namespace WebAuth.Services
             _passwordService = passwordService;
             _authRepository = authRepository;
         }
-
-        public async Task Register(RegisterRequestDTO registerRequestDTO)
-        {
-            var hashedPassword = _passwordService.Generate(registerRequestDTO.Password);
-
-            var user = await _authRepository.Register(registerRequestDTO);
-
-            if (user == null)
-            {
-                //_response.StatusCode = HttpStatusCode.BadRequest;
-                
-            }
-        }
     }
 }

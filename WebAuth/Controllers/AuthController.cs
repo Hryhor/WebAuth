@@ -70,28 +70,29 @@ namespace WebAuth.Controllers
                     UserName = requestDTO.Name, 
                 };
 
-                var result = await _userManager.CreateAsync(applicationUser, requestDTO.Password);
+                var createdUser = await _authRepository.CreateUserAsync(applicationUser, requestDTO.Password); //await _userManager.CreateAsync(applicationUser, requestDTO.Password);
 
-                if (!result.Succeeded)
+                if (!createdUser)
                 {
                     _response.StatusCode = HttpStatusCode.BadRequest;
-                    _response.IsSuccess = false;
-                    _response.ErrorMessages = result.Errors.Select(e => e.Description).ToList();
+                    _response.IsSuccess = false; 
+                    _response.ErrorMessages = new List<string>() { "User creation failed" };//result.Errors.Select(e => e.Description).ToList();
 
                     return BadRequest(_response);
                 }
 
-                if (result.Succeeded)
+                if (createdUser)
                 {
-                    if (!_roleManager.RoleExistsAsync("admin").GetAwaiter().GetResult())
+                    if (!await _authRepository.RoleExistsAsync("admin"))
                     {
-                        await _roleManager.CreateAsync(new IdentityRole("admin"));
-                        await _roleManager.CreateAsync(new IdentityRole("customer"));
+                        await _authRepository.CreateRoleAsync("admin");
+                        await _authRepository.CreateRoleAsync("customer");
                     }
 
-                    await _userManager.AddToRoleAsync(applicationUser, "admin");
+                    await _authRepository.AddUserToRoleAsync(applicationUser, "admin"); //await _userManager.AddToRoleAsync(applicationUser, "admin");
 
-                    var userToReturn = _db.ApplicationUsers.FirstOrDefault(u => u.UserName == requestDTO.Name);
+                   
+                    var userToReturn = _authRepository.GetUserByNameAsync(requestDTO.Name); //_db.ApplicationUsers.FirstOrDefault(u => u.UserName == requestDTO.Name);
 
                     if (userToReturn != null)
                     {
@@ -166,15 +167,23 @@ namespace WebAuth.Controllers
 
                 string email = requestDTO.Email.ToUpper();
 
-                var user =  _db.ApplicationUsers.FirstOrDefault(u => u.Email.ToUpper() == email);
+                var user = await _authRepository.GetUserByEmailAsync(email);  //_db.ApplicationUsers.FirstOrDefault(u => u.Email.ToUpper() == email);
 
-                bool isValid = await _userManager.CheckPasswordAsync(user, requestDTO.Password);
-
-                if (user == null || isValid == false)
+                if (user == null)
                 {
                     _response.IsSuccess = false;
                     _response.StatusCode = HttpStatusCode.BadRequest;
                     _response.ErrorMessages = new List<string>() { "This User does not exist" };
+                    return BadRequest(_response);
+                }
+
+                bool isValid = await _userManager.CheckPasswordAsync(user, requestDTO.Password);
+
+                if (isValid == false)
+                {
+                    _response.IsSuccess = false;
+                    _response.StatusCode = HttpStatusCode.BadRequest;
+                    _response.ErrorMessages = new List<string>() { "Your email or passwor does not valid" };
 
                     return BadRequest(_response);
                 }
@@ -234,8 +243,7 @@ namespace WebAuth.Controllers
                     return BadRequest(_response);
                 }
 
-                //из запроса вытащить пользователя у которого надо удалить токен
-                var tokenEntity = await _db.UserTokens.FirstOrDefaultAsync(t => t.Value == refreshToken);
+                var tokenEntity = await _authRepository.GetTokenAsync(refreshToken);
 
                 if (tokenEntity == null)
                 {
@@ -247,9 +255,7 @@ namespace WebAuth.Controllers
                     return NotFound(_response);
                 }
 
-                _db.UserTokens.Remove(tokenEntity);
-
-                await _db.SaveChangesAsync();
+                await _authRepository.RemoveTokenAsync(tokenEntity);
 
                 // Удаление куки
                 Response.Cookies.Delete("refreshToken");
@@ -288,7 +294,7 @@ namespace WebAuth.Controllers
                 }
 
                 var userData = _tokenService.ValidateRefreshToken(refreshToken);
-                var tokenFromDb = await _db.UserTokens.FirstOrDefaultAsync(e => e.Value == refreshToken);
+                var tokenFromDb = _authRepository.GetTokenAsync(refreshToken); //await _db.UserTokens.FirstOrDefaultAsync(e => e.Value == refreshToken);
 
                 if (userData == null || tokenFromDb == null)
                 {
@@ -297,7 +303,7 @@ namespace WebAuth.Controllers
                     return BadRequest(_response);
                 }
 
-                var user = await _db.Users.FirstOrDefaultAsync(u => u.Id == userName.Id);
+                var user = await _authRepository.GetUserByIdAsync(userName.Id); //await _db.Users.FirstOrDefaultAsync(u => u.Id == userName.Id);
 
                 if (user == null)
                 {
@@ -307,11 +313,15 @@ namespace WebAuth.Controllers
                 }
 
                 //var tokens = _tokenService.GenerateTokens();
-                var tokens = _tokenService.GenerateTokens(new UserDTO { Id = user.Id, Name = user.UserName });
+                var tokens = _tokenService.GenerateTokens(new UserDTO 
+                { 
+                    Id = user.Id.ToString(), 
+                    Name = user.UserName 
+                });
 
                 _response.IsSuccess = true;
                 _response.StatusCode = HttpStatusCode.OK;
-                return null;
+                return Ok(_response);
             }
             catch (Exception ex)
             {
