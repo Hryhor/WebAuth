@@ -15,25 +15,18 @@ namespace WebAuth.Repository
     {
         private readonly ApplicationDbContext _db;
         private string secretKey;
-        private readonly IMapper _mapper;
 
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly RoleManager<IdentityRole> _roleManager;
-        private readonly ITokenService _tokenService;
-        private readonly IEmailService _emailService;
 
         public AuthRepository(ApplicationDbContext db, IConfiguration configuration,
             UserManager<ApplicationUser> userManager,
-            RoleManager<IdentityRole> roleManager,
-            ITokenService tokenService, IMapper mapper, IEmailService emailService)
+            RoleManager<IdentityRole> roleManager)
         {
             _db = db;
             secretKey = configuration.GetValue<string>("ApiSettings:Secret");
             _userManager = userManager;
             _roleManager = roleManager;
-            _mapper = mapper;
-            _tokenService = tokenService;
-            _emailService = emailService;
         }
 
         public bool IsUniqueUser(string email)
