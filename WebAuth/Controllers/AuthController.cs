@@ -1,19 +1,10 @@
-﻿using AutoMapper;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Http.HttpResults;
-using Microsoft.AspNetCore.Identity;
+﻿using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
-using Newtonsoft.Json.Linq;
+using System.ComponentModel.DataAnnotations;
 using System.Net;
-using System.Security.Claims;
-using WebAuth.Data;
 using WebAuth.Interfaces.Auth;
 using WebAuth.Models;
 using WebAuth.Models.DTO;
-using WebAuth.Repository.IRepository;
-using WebAuth.Services;
 
 namespace WebAuth.Controllers
 {
@@ -22,28 +13,18 @@ namespace WebAuth.Controllers
     public class AuthController : ControllerBase
     {
         protected APIResponse _response;
-        private readonly IAuthRepository _authRepository;
-        private readonly ITokenService _tokenService;
 
-        private readonly IMapper _mapper;
-        private readonly ApplicationDbContext _db;
         private readonly UserManager<ApplicationUser> _userManager;
-        private readonly RoleManager<IdentityRole> _roleManager;
         private readonly IEmailService _emailService;
+        private readonly IUserService _userService;
 
-        public AuthController(IAuthRepository authRepository, ITokenService tokenService,
-            UserManager<ApplicationUser> userManager, RoleManager<IdentityRole> roleManager,
-            ApplicationDbContext db, IMapper mapper, IEmailService emailService
-            )
+        public AuthController(UserManager<ApplicationUser> userManager,
+             IEmailService emailService, IUserService userService)
         {
             _response = new();
-            _authRepository = authRepository;
-            _tokenService = tokenService;
-            _db = db;
             _userManager = userManager;
-            _roleManager = roleManager;
-            _mapper = mapper;
             _emailService = emailService;
+            _userService = userService;
         }
 
         [HttpPost("register")]
@@ -62,82 +43,47 @@ namespace WebAuth.Controllers
                     return BadRequest(_response);
                 }
 
-                var applicationUser = new ApplicationUser()
+                if (!new EmailAddressAttribute().IsValid(requestDTO.Email))
                 {
-                    Email = requestDTO.Email,
-                    NormalizedEmail = requestDTO.Email.ToUpper(),
-                    Name = requestDTO.Name,
-                    UserName = requestDTO.Name, 
-                };
+                    _response.StatusCode = HttpStatusCode.BadRequest;
+                    _response.IsSuccess = false;
+                    _response.ErrorMessages = new List<string> { "Invalid email format" };
+                    
+                    return BadRequest(_response);
+                }
 
-                var createdUser = await _authRepository.CreateUserAsync(applicationUser, requestDTO.Password); //await _userManager.CreateAsync(applicationUser, requestDTO.Password);
+                var registerResult = await _userService.RegisterAsync(requestDTO);
 
-                if (!createdUser)
+                if (registerResult.Success == false)
                 {
                     _response.StatusCode = HttpStatusCode.BadRequest;
                     _response.IsSuccess = false; 
-                    _response.ErrorMessages = new List<string>() { "User creation failed" };//result.Errors.Select(e => e.Description).ToList();
+                    _response.ErrorMessages = new List<string>() { registerResult.Error };
 
                     return BadRequest(_response);
                 }
 
-                if (createdUser)
+                var token = await _userManager.GenerateEmailConfirmationTokenAsync(registerResult.applicationUser);
+                var confirmationLink = Url.Action("ConfirmEmail", "Auth", new { userId = registerResult.applicationUser.Id, token = token }, Request.Scheme);
+
+                var cookieOptions = new CookieOptions
                 {
-                    if (!await _authRepository.RoleExistsAsync("admin"))
-                    {
-                        await _authRepository.CreateRoleAsync("admin");
-                        await _authRepository.CreateRoleAsync("customer");
-                    }
+                    HttpOnly = true, // Только для HTTP, не доступно через JavaScript
+                    Secure = true,   // Использовать cookie только через HTTPS
+                    MaxAge = TimeSpan.FromDays(30), // Срок действия cookie (30 дней)
+                    SameSite = SameSiteMode.Strict // Защищает от CSRF атак
+                };
 
-                    await _authRepository.AddUserToRoleAsync(applicationUser, "admin"); //await _userManager.AddToRoleAsync(applicationUser, "admin");
+                Response.Cookies.Append("refreshToken", registerResult.RefreshToken, cookieOptions);
+                await _emailService.SendEmailAsync(registerResult.applicationUser.Email, "Подтверждение почты", $"Перейдите по следующей ссылке для подтверждения: {confirmationLink}");
 
-                   
-                    var userToReturn = _authRepository.GetUserByNameAsync(requestDTO.Name); //_db.ApplicationUsers.FirstOrDefault(u => u.UserName == requestDTO.Name);
-
-                    if (userToReturn != null)
-                    {
-                        var userCreated = _mapper.Map<UserDTO>(userToReturn);
-                        var takenAccess = _tokenService.GenerateAccessToken(userCreated);
-                        var refreshToken = _tokenService.GenerateRefreshToken(userCreated);
-                        await _tokenService.SaveToken(userCreated, refreshToken);
-
-                        var cookieOptions = new CookieOptions
-                        {
-                            HttpOnly = true, // Только для HTTP, не доступно через JavaScript
-                            Secure = true,   // Использовать cookie только через HTTPS
-                            MaxAge = TimeSpan.FromDays(30), // Срок действия cookie (30 дней)
-                            SameSite = SameSiteMode.Strict // Защищает от CSRF атак
-                        };
-
-                        var token = await _userManager.GenerateEmailConfirmationTokenAsync(applicationUser);
-                        var confirmationLink = Url.Action("ConfirmEmail", "Auth", new { userId = applicationUser.Id, token = token }, Request.Scheme);
-
-                        // Отправка email с подтверждением
-                        await _emailService.SendEmailAsync(applicationUser.Email, "Подтверждение почты", $"Перейдите по следующей ссылке для подтверждения: {confirmationLink}");
-
-
-                        //await ConfirmEmail(userCreated.Id, takenAccess);
-
-                        Response.Cookies.Append("refreshToken", refreshToken, cookieOptions);
-
-                        var resDTO = new
-                        {
-                            AccessToken = takenAccess,
-                            //RefreshToken = refreshToken
-                        };
-
-                        _response.Result = resDTO;
-                        _response.StatusCode = HttpStatusCode.OK;
-                        _response.IsSuccess = true;
-
-                        return Ok(_response);
-                    }
-                }
-
-                _response.StatusCode = HttpStatusCode.BadRequest;
-                _response.IsSuccess = false;
-                _response.ErrorMessages.Add("Error occurred during user creation");
-                return BadRequest(_response);
+                _response.Result = new List<string> {
+                    registerResult.AccessToken,
+                    registerResult.RefreshToken,
+                };
+                _response.StatusCode = HttpStatusCode.OK;
+                _response.IsSuccess = true;
+                return Ok(_response);
             } 
             catch (Exception ex)
             {
@@ -147,7 +93,6 @@ namespace WebAuth.Controllers
                 return BadRequest(_response);
             }
         }
-
 
         [HttpPost("login")]
         [ProducesResponseType(StatusCodes.Status200OK)]
@@ -165,35 +110,15 @@ namespace WebAuth.Controllers
                     return BadRequest(_response);
                 }
 
-                string email = requestDTO.Email.ToUpper();
+                var registerResult = await _userService.LoginAsync(requestDTO);
 
-                var user = await _authRepository.GetUserByEmailAsync(email);  //_db.ApplicationUsers.FirstOrDefault(u => u.Email.ToUpper() == email);
-
-                if (user == null)
+                if (registerResult.Success == false)
                 {
                     _response.IsSuccess = false;
                     _response.StatusCode = HttpStatusCode.BadRequest;
-                    _response.ErrorMessages = new List<string>() { "This User does not exist" };
+                    _response.ErrorMessages = new List<string>() { registerResult.Error };
                     return BadRequest(_response);
                 }
-
-                bool isValid = await _userManager.CheckPasswordAsync(user, requestDTO.Password);
-
-                if (isValid == false)
-                {
-                    _response.IsSuccess = false;
-                    _response.StatusCode = HttpStatusCode.BadRequest;
-                    _response.ErrorMessages = new List<string>() { "Your email or passwor does not valid" };
-
-                    return BadRequest(_response);
-                }
-
-                var roles = await _userManager.GetRolesAsync(user);
-
-                //сгенерить токены
-                var userLogin = _mapper.Map<UserDTO>(user);
-                var takenAccess = _tokenService.GenerateAccessToken(userLogin);
-                var refreshToken = _tokenService.GenerateRefreshToken(userLogin);
 
                 var cookieOptions = new CookieOptions
                 {
@@ -203,20 +128,18 @@ namespace WebAuth.Controllers
                     SameSite = SameSiteMode.Strict // Защищает от CSRF атак
                 };
 
-                Response.Cookies.Append("refreshToken", refreshToken, cookieOptions);
+                Response.Cookies.Append("refreshToken", registerResult.RefreshToken, cookieOptions);
 
-                var resDTO = new
-                {
-                    AccessToken = takenAccess,
-                    //RefreshToken = refreshToken
+                _response.Result = new List<string>() {
+                    registerResult.AccessToken,
+                    registerResult.RefreshToken,
                 };
-
-                _response.Result = resDTO;
                 _response.IsSuccess = true;
                 _response.StatusCode = HttpStatusCode.OK;
 
                 return Ok(_response);
-            } catch(Exception ex)
+            } 
+            catch(Exception ex)
             {
                 _response.StatusCode = HttpStatusCode.BadRequest;
                 _response.IsSuccess = false;
@@ -234,35 +157,22 @@ namespace WebAuth.Controllers
             {
                 var refreshToken = Request.Cookies["refreshToken"];
 
-                if (string.IsNullOrEmpty(refreshToken))
+                var logoutResult = await _userService.LogoutAsync(refreshToken);
+
+                if (logoutResult.Success == false)
                 {
                     Response.Cookies.Delete("refreshToken");
-                    _response.IsSuccess = false;
-                    _response.Result = "No refresh token found in cookies.";
+                    _response.IsSuccess = logoutResult.Success;
+                    _response.Result = "Failed to log out.";
                     _response.StatusCode = HttpStatusCode.BadRequest;
                     return BadRequest(_response);
                 }
 
-                var tokenEntity = await _authRepository.GetTokenAsync(refreshToken);
-
-                if (tokenEntity == null)
-                {
-                    // Если токен не найден, удаляем куки и возвращаем ответ
-                    Response.Cookies.Delete("refreshToken");
-                    _response.IsSuccess = false;
-                    _response.Result = "Invalid refresh token.";
-                    _response.StatusCode = HttpStatusCode.NotFound;
-                    return NotFound(_response);
-                }
-
-                await _authRepository.RemoveTokenAsync(tokenEntity);
-
-                // Удаление куки
                 Response.Cookies.Delete("refreshToken");
 
-                _response.IsSuccess = true;
+                _response.IsSuccess = logoutResult.Success;
                 _response.StatusCode = HttpStatusCode.OK;
-                _response.Result = "Successfully logged out";
+                _response.Result = "Successfully logged out.";
 
                 return Ok(_response);
             }
@@ -272,7 +182,6 @@ namespace WebAuth.Controllers
                 _response.ErrorMessages = new List<string>() { ex.ToString() };
                 return BadRequest(_response);
             }
-            
         }
 
         [HttpPost("refresh")]
@@ -284,43 +193,23 @@ namespace WebAuth.Controllers
             {
                 var refreshToken = Request.Cookies["refreshToken"];
 
-                if (string.IsNullOrEmpty(refreshToken))
+                var refreshResult = await _userService.RefreshAsync(refreshToken, userName);
+
+                if (refreshResult.Success == false)
                 {
-                    Response.Cookies.Delete("refreshToken");
-                    _response.IsSuccess = false;
-                    _response.Result = "No refresh token found in cookies.";
+                    _response.IsSuccess = refreshResult.Success;
+                    _response.Result = refreshResult.Error;
                     _response.StatusCode = HttpStatusCode.BadRequest;
                     return BadRequest(_response);
                 }
 
-                var userData = _tokenService.ValidateRefreshToken(refreshToken);
-                var tokenFromDb = _authRepository.GetTokenAsync(refreshToken); //await _db.UserTokens.FirstOrDefaultAsync(e => e.Value == refreshToken);
-
-                if (userData == null || tokenFromDb == null)
-                {
-                    _response.IsSuccess = false;
-                    _response.ErrorMessages = new List<string>() { "Invalid token or token not found in the database" };
-                    return BadRequest(_response);
-                }
-
-                var user = await _authRepository.GetUserByIdAsync(userName.Id); //await _db.Users.FirstOrDefaultAsync(u => u.Id == userName.Id);
-
-                if (user == null)
-                {
-                    _response.IsSuccess = false;
-                    _response.ErrorMessages = new List<string>() { "User not found" };
-                    return BadRequest(_response);
-                }
-
-                //var tokens = _tokenService.GenerateTokens();
-                var tokens = _tokenService.GenerateTokens(new UserDTO 
-                { 
-                    Id = user.Id.ToString(), 
-                    Name = user.UserName 
-                });
-
                 _response.IsSuccess = true;
+                _response.Result = new List<string>() {
+                    refreshResult.RefreshToken,
+                    refreshResult.AccessToken,
+                };
                 _response.StatusCode = HttpStatusCode.OK;
+
                 return Ok(_response);
             }
             catch (Exception ex)
@@ -332,27 +221,22 @@ namespace WebAuth.Controllers
         }
 
         [HttpGet("confirmemail")]
+        [ProducesResponseType(StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status400BadRequest)]
         public async Task<IActionResult> ConfirmEmail(string userId, string token)
         {
-            var user = await _userManager.FindByIdAsync(userId);
-            if (user == null)
+            var resultConfirmedEmail = await _userService.ConfirmEmailAsync(userId, token);
+
+            if (resultConfirmedEmail.Success == false)
             {
-                _response.IsSuccess = false;
-                _response.ErrorMessages.Add("Неверный пользователь.");
+                _response.IsSuccess = resultConfirmedEmail.Success;
+                _response.ErrorMessages = new List<string> { resultConfirmedEmail.Message };
                 return BadRequest(_response);
             }
 
-            var result = await _userManager.ConfirmEmailAsync(user, token);
-            if (result.Succeeded)
-            {
-                _response.IsSuccess = true;
-                _response.Result = "Электронная почта успешно подтверждена.";
-                return Ok(_response);
-            }
-
-            _response.IsSuccess = false;
-            _response.ErrorMessages.Add("Ошибка подтверждения электронной почты.");
-            return BadRequest(_response);
+            _response.IsSuccess = true;
+            _response.Result = resultConfirmedEmail.Message;
+            return Ok(_response);
         }
     }
 }
