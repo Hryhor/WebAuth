@@ -61,13 +61,24 @@ namespace WebAuth.Services
 
                 if (createdUser)
                 {
-                    if (!await _authRepository.RoleExistsAsync("admin"))
+                    if (!await _authRepository.RoleExistsAsync("customer"))
                     {
-                        await _authRepository.CreateRoleAsync("admin");
                         await _authRepository.CreateRoleAsync("customer");
                     }
 
-                    await _authRepository.AddUserToRoleAsync(applicationUser, "admin");
+                    if (!await _authRepository.RoleExistsAsync("admin"))
+                    {
+                        await _authRepository.CreateRoleAsync("admin");
+                    }
+
+                    if (requestDTO.Email == "men2020v@gmail.com")
+                    {
+                        await _authRepository.AddUserToRoleAsync(applicationUser, "admin");
+                    }
+                    else
+                    {
+                        await _authRepository.AddUserToRoleAsync(applicationUser, "customer");
+                    }                    
 
                     var userToReturn = await _authRepository.GetUserByNameAsync(requestDTO.Name);
 
@@ -188,7 +199,7 @@ namespace WebAuth.Services
             }
 
             var userData = _tokenService.ValidateRefreshToken(refreshToken);
-            var tokenFromDb = _authRepository.GetTokenAsync(refreshToken);
+            var tokenFromDb = await _authRepository.GetTokenAsync(refreshToken);
 
             if (userData == null || tokenFromDb == null)
             {
